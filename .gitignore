@@ -8,3 +8,5 @@ yarn-error.log*
 .vscode/
 .env
 node_modules/
+.env
+node_modules/
