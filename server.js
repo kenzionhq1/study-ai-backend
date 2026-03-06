@@ -145,7 +145,14 @@ const allowedOrigins = new Set([
   "http://127.0.0.1:5173",
   "http://localhost:8080",
   "http://127.0.0.1:8080",
+  "https://studyassistant-pi.vercel.app",
 ]);
+const allowedOriginPatterns = [
+  /^https:\/\/[a-z0-9-]+\.onrender\.com$/i,
+  /^https:\/\/[a-z0-9-]+\.vercel\.app$/i,
+  /^http:\/\/localhost:\d+$/i,
+  /^http:\/\/127\.0\.0\.1:\d+$/i,
+];
 if (process.env.FRONTEND_ORIGINS) {
   for (const origin of process.env.FRONTEND_ORIGINS.split(",")) {
     const trimmed = origin.trim();
@@ -155,7 +162,12 @@ if (process.env.FRONTEND_ORIGINS) {
 app.use(
   cors({
     origin(origin, callback) {
-      if (!origin || allowedOrigins.has(origin)) {
+      const allowAll = process.env.CORS_ALLOW_ALL === "true";
+      const patternMatched =
+        typeof origin === "string" &&
+        allowedOriginPatterns.some((pattern) => pattern.test(origin));
+
+      if (!origin || allowAll || allowedOrigins.has(origin) || patternMatched) {
         return callback(null, true);
       }
       return callback(new Error("CORS origin not allowed"));
