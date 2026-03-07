@@ -38,36 +38,95 @@ const getGroqGuardModel = () =>
   (process.env.GROQ_GUARD_MODEL || DEFAULT_GROQ_GUARD_MODEL).trim();
 const useGroqGuard = () =>
   process.env.USE_GROQ_GUARD === "true" && getProvider() === GROQ_PROVIDER;
+const SCIENCE_DIAGRAM_KEYWORDS = [
+  "biology",
+  "chemistry",
+  "physics",
+  "science",
+  "cell",
+  "atom",
+  "molecule",
+  "photosynthesis",
+  "respiration",
+  "ecosystem",
+  "electric",
+  "current",
+  "circuit",
+  "voltage",
+  "magnet",
+  "thermo",
+  "enzyme",
+  "osmosis",
+  "mitosis",
+  "dna",
+  "rna",
+  "algorithm",
+  "flow",
+  "process",
+  "pipeline",
+];
 
-const buildLocalTopic = (normalizedTopic) => ({
-  topic: normalizedTopic,
-  content: {
-    definition: `${normalizedTopic} is an important study topic.`,
-    explanation:
-      "This content was generated locally by the backend provider.",
-    keyPoints: [
-      `Understand the core concepts of ${normalizedTopic}.`,
-      "Break the topic into definitions, examples, and edge cases.",
-      "Practice active recall with short questions.",
-    ],
-    example: {
-      title: `${normalizedTopic} Example`,
-      content: `A simple worked example for ${normalizedTopic}.`,
+const buildFallbackMermaid = (topic) =>
+  `flowchart TD
+  A[${topic}] --> B[Core Mechanism]
+  B --> C[Key Transformation]
+  C --> D[Observable Result]
+  D --> E[Real-World Impact]`;
+
+const toMermaidImageUrl = (mermaid) => {
+  const encoded = Buffer.from(mermaid, "utf8").toString("base64");
+  return `https://mermaid.ink/img/${encoded}`;
+};
+
+const shouldIncludeDiagram = (normalizedTopic) => {
+  const lowered = normalizedTopic.toLowerCase();
+  return SCIENCE_DIAGRAM_KEYWORDS.some((keyword) => lowered.includes(keyword));
+};
+
+const buildLocalTopic = (normalizedTopic, includeDiagram = false) => {
+  const payload = {
+    topic: normalizedTopic,
+    content: {
+      definition: `${normalizedTopic} is an important study topic.`,
+      explanation:
+        "This content was generated locally by the backend provider.",
+      keyPoints: [
+        `Understand the core concepts of ${normalizedTopic}.`,
+        "Break the topic into definitions, examples, and edge cases.",
+        "Practice active recall with short questions.",
+      ],
+      example: {
+        title: `${normalizedTopic} Example`,
+        content: `A simple worked example for ${normalizedTopic}.`,
+      },
+      examTips: [
+        "Start with definitions before deeper explanations.",
+        "Practice likely MCQ and short-answer patterns.",
+      ],
     },
-    examTips: [
-      "Start with definitions before deeper explanations.",
-      "Practice likely MCQ and short-answer patterns.",
+    questions: [
+      {
+        question: `Which statement best describes ${normalizedTopic}?`,
+        options: ["Core concept", "Unrelated concept", "Random fact", "None of the above"],
+        answer: "Core concept",
+      },
     ],
-  },
-  questions: [
-    {
-      question: `Which statement best describes ${normalizedTopic}?`,
-      options: ["Core concept", "Unrelated concept", "Random fact", "None of the above"],
-      answer: "Core concept",
-    },
-  ],
-  source: LOCAL_PROVIDER,
-});
+    source: LOCAL_PROVIDER,
+  };
+
+  if (includeDiagram) {
+    const mermaid = buildFallbackMermaid(normalizedTopic);
+    payload.content.diagram = {
+      title: `${normalizedTopic} Diagram`,
+      type: "mermaid",
+      mermaid,
+      caption: "Visual process overview",
+      imageUrl: toMermaidImageUrl(mermaid),
+    };
+  }
+
+  return payload;
+};
 
 function getOpenAIClient() {
   if (!openaiClient) {
@@ -200,7 +259,7 @@ const parseTopicJson = (text) => {
   }
 };
 
-const normalizeGeneratedTopic = (raw, normalizedTopic) => {
+const normalizeGeneratedTopic = (raw, normalizedTopic, includeDiagram = false) => {
   const topicValue = String(raw?.topic || normalizedTopic).trim() || normalizedTopic;
   const content = raw?.content || {};
 
@@ -233,7 +292,7 @@ const normalizeGeneratedTopic = (raw, normalizedTopic) => {
     });
   }
 
-  return {
+  const normalized = {
     topic: topicValue,
     content: {
       definition: String(content.definition || "").trim(),
@@ -247,9 +306,31 @@ const normalizeGeneratedTopic = (raw, normalizedTopic) => {
     },
     questions: normalizedQuestions.slice(0, 5),
   };
+
+  if (includeDiagram) {
+    const diagram = content.diagram || {};
+    const mermaid = String(diagram.mermaid || "").trim() || buildFallbackMermaid(topicValue);
+    normalized.content.diagram = {
+      title: String(diagram.title || `${topicValue} Diagram`).trim(),
+      type: "mermaid",
+      mermaid,
+      caption: String(diagram.caption || "Visual process overview").trim(),
+      imageUrl: toMermaidImageUrl(mermaid),
+    };
+  }
+
+  return normalized;
 };
 
-const buildStudyPrompt = (normalizedTopic) => `
+const buildStudyPrompt = (normalizedTopic, includeDiagram = false) => {
+  const diagramBlock = includeDiagram
+    ? ',\n    "diagram": { "title": "", "type": "mermaid", "mermaid": "", "caption": "" }'
+    : "";
+  const diagramSection = includeDiagram
+    ? '\n8) Diagram Output (Required for this topic)\n- Fill "content.diagram" with a valid Mermaid flowchart for the core process.\n- Keep Mermaid syntax clean and renderable.'
+    : "";
+
+  return `
 You are an elite professor and textbook author.
 Write like top-university lecture notes (MIT/Stanford style): precise, deep, and clear.
 
@@ -263,7 +344,7 @@ Return strict JSON only with this exact shape:
     "explanation": "",
     "keyPoints": [],
     "example": { "title": "", "content": "" },
-    "examTips": []
+    "examTips": []${diagramBlock}
   },
   "questions": [
     { "question": "", "options": ["", "", "", ""], "answer": "" }
@@ -301,6 +382,7 @@ Inside the JSON content, follow this structure:
 7) Mini Diagram Using Text
 - Add a concise text diagram in "content.example.content" that matches topic type.
 - For history/story topics use timeline/causal map, not mechanical pipeline arrows.
+${diagramSection}
 
 Quality + length targets (approximate):
 - definition: around 80 words
@@ -318,6 +400,7 @@ Rules:
 - No markdown, no code fence, JSON only.
 - If output is too long, keep explanation depth first and shorten lower-priority sections.
 `;
+};
 
 export const moderateTopicWithAI = async (topic) => {
   const normalizedTopic = String(topic || "").trim();
@@ -416,9 +499,10 @@ export const generateTopicWithAI = async (topic) => {
   }
 
   const provider = getProvider();
+  const includeDiagram = shouldIncludeDiagram(normalizedTopic);
 
   if (provider === LOCAL_PROVIDER) {
-    return buildLocalTopic(normalizedTopic);
+    return buildLocalTopic(normalizedTopic, includeDiagram);
   }
 
   if (![OPENAI_PROVIDER, GROQ_PROVIDER].includes(provider)) {
@@ -431,7 +515,7 @@ export const generateTopicWithAI = async (topic) => {
     });
   }
 
-  const prompt = buildStudyPrompt(normalizedTopic);
+  const prompt = buildStudyPrompt(normalizedTopic, includeDiagram);
   const models = provider === GROQ_PROVIDER ? getGroqModels() : getOpenAIModels();
   const client = provider === GROQ_PROVIDER ? getGroqClient() : getOpenAIClient();
   const maxTopicTokens = getMaxTopicTokens();
@@ -464,7 +548,11 @@ export const generateTopicWithAI = async (topic) => {
       }
 
       const parsed = parseTopicJson(text);
-      return { ...normalizeGeneratedTopic(parsed, normalizedTopic), source: provider, model };
+      return {
+        ...normalizeGeneratedTopic(parsed, normalizedTopic, includeDiagram),
+        source: provider,
+        model,
+      };
     } catch (err) {
       const mapped = mapProviderError(provider, err);
       const modelMissing =
