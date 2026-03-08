@@ -175,6 +175,11 @@ app.use(
     credentials: true,
   })
 );
+// Allow private network (loopback) requests for browsers that enforce PNA preflight
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Private-Network", "true");
+  next();
+});
 app.use(express.json());
 
 // Routes
