@@ -1,28 +1,41 @@
 import nodemailer from "nodemailer";
 
+const envVal = (primary, ...fallbacks) => {
+  for (const key of [primary, ...fallbacks]) {
+    if (process.env[key]) return process.env[key];
+  }
+  return "";
+};
+
 const getAdminEmails = () =>
   (process.env.ADMIN_EMAILS || "")
     .split(",")
     .map((e) => e.trim().toLowerCase())
     .filter(Boolean);
 
-const hasSmtpConfig = () =>
-  process.env.SMTP_HOST &&
-  process.env.SMTP_PORT &&
-  process.env.SMTP_USER &&
-  process.env.SMTP_PASS &&
-  process.env.SMTP_FROM;
+const getSmtpConfig = () => {
+  const host = envVal("SMTP_HOST", "MAIL_HOST");
+  const port = envVal("SMTP_PORT", "MAIL_PORT") || "587";
+  const user = envVal("SMTP_USER", "MAIL_USER");
+  const pass = envVal("SMTP_PASS", "MAIL_PASS");
+  const from = envVal("SMTP_FROM", "MAIL_FROM") || user;
+  return { host, port: Number(port), user, pass, from };
+};
 
-const buildTransport = () =>
-  nodemailer.createTransport({
-    host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT || 587),
-    secure: false,
-    auth: {
-      user: process.env.SMTP_USER,
-      pass: process.env.SMTP_PASS,
-    },
+const hasSmtpConfig = () => {
+  const { host, port, user, pass, from } = getSmtpConfig();
+  return Boolean(host && port && user && pass && from);
+};
+
+const buildTransport = () => {
+  const { host, port, user, pass } = getSmtpConfig();
+  return nodemailer.createTransport({
+    host,
+    port: Number(port || 587),
+    secure: Number(port) === 465,
+    auth: { user, pass },
   });
+};
 
 export const sendAdminSignupNotification = async (user) => {
   const recipients = getAdminEmails();
@@ -40,7 +53,7 @@ export const sendAdminSignupNotification = async (user) => {
 
   try {
     await transporter.sendMail({
-      from: process.env.SMTP_FROM,
+      from: getSmtpConfig().from,
       to: recipients.join(","),
       subject,
       text,
