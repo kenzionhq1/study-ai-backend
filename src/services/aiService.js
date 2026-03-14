@@ -16,7 +16,12 @@ const OPENAI_PROVIDER = "openai";
 const GROQ_PROVIDER = "groq";
 const DEFAULT_OPENAI_MODELS = ["gpt-4o-mini", "gpt-4.1-mini"];
 const DEFAULT_GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
-const DEFAULT_GROQ_GUARD_MODEL = "meta-llama/llama-guard-4-12b";
+const DEFAULT_GROQ_GUARD_MODELS = [
+  "meta-llama/llama-prompt-guard-2-22m",
+  "meta-llama/llama-prompt-guard-2-86m",
+  "meta-llama/llama-guard-4-12b",
+  "openai/gpt-oss-safeguard-20b",
+];
 const getMaxTopicTokens = () => {
   const raw = Number(process.env.MAX_TOPIC_TOKENS);
   if (!Number.isFinite(raw) || raw <= 0) return null;
@@ -34,8 +39,15 @@ const getGroqModels = () =>
     .split(",")
     .map((model) => model.trim())
     .filter(Boolean);
-const getGroqGuardModel = () =>
-  (process.env.GROQ_GUARD_MODEL || DEFAULT_GROQ_GUARD_MODEL).trim();
+const getGroqGuardModels = () => {
+  const raw =
+    process.env.GROQ_GUARD_MODELS || process.env.GROQ_GUARD_MODEL || "";
+  const list = raw
+    .split(",")
+    .map((m) => m.trim())
+    .filter(Boolean);
+  return list.length ? list : DEFAULT_GROQ_GUARD_MODELS;
+};
 const useGroqGuard = () =>
   process.env.USE_GROQ_GUARD === "true" && getProvider() === GROQ_PROVIDER;
 const SCIENCE_DIAGRAM_KEYWORDS = [
@@ -435,10 +447,13 @@ export const moderateTopicWithAI = async (topic) => {
     return { checked: false, flagged: false };
   }
 
-  try {
-    const guardModel = getGroqGuardModel();
-    const client = getGroqClient();
-    const prompt = `
+  const guardModels = getGroqGuardModels();
+  const client = getGroqClient();
+  let lastErr = null;
+
+  for (const guardModel of guardModels) {
+    try {
+      const prompt = `
 Classify whether this topic is safe and appropriate for an educational study app.
 Topic: "${normalizedTopic}"
 
@@ -452,60 +467,82 @@ Return JSON only:
   "message": "short_user_message"
 }`;
 
-    const response = await client.chat.completions.create({
-      model: guardModel,
-      temperature: 0,
-      max_tokens: 120,
-      messages: [
-        { role: "system", content: "You are a strict safety classifier." },
-        { role: "user", content: prompt },
-      ],
-    });
+      const response = await client.chat.completions.create({
+        model: guardModel,
+        temperature: 0,
+        max_tokens: 120,
+        messages: [
+          { role: "system", content: "You are a strict safety classifier." },
+          { role: "user", content: prompt },
+        ],
+      });
 
-    const text = extractTextFromChatCompletion(response);
-    let allowed = true;
-    let parsedReason = "allowed";
-    let parsedMessage = "";
-    try {
-      const parsed = parseTopicJson(text);
-      allowed = Boolean(parsed?.allowed);
-      parsedReason = String(parsed?.reason || parsedReason);
-      parsedMessage = String(parsed?.message || parsedMessage);
-    } catch {
-      const lowered = text.toLowerCase();
-      if (
-        lowered.includes("disallow") ||
-        lowered.includes("not allowed") ||
-        lowered.includes("unsafe")
-      ) {
-        allowed = false;
-        parsedReason = "blocked_by_ai_guard";
+      const text = extractTextFromChatCompletion(response);
+      let allowed = true;
+      let parsedReason = "allowed";
+      let parsedMessage = "";
+      try {
+        const parsed = parseTopicJson(text);
+        allowed = Boolean(parsed?.allowed);
+        parsedReason = String(parsed?.reason || parsedReason);
+        parsedMessage = String(parsed?.message || parsedMessage);
+      } catch {
+        const lowered = text.toLowerCase();
+        if (
+          lowered.includes("disallow") ||
+          lowered.includes("not allowed") ||
+          lowered.includes("unsafe")
+        ) {
+          allowed = false;
+          parsedReason = "blocked_by_ai_guard";
+        }
       }
-    }
 
-    if (!allowed) {
-      return {
-        checked: true,
-        flagged: true,
-        code: "INAPPROPRIATE_TOPIC",
-        reason: parsedReason,
-        message:
-          parsedMessage.trim() ||
-          "This topic is not allowed. Please enter an academic study topic.",
-      };
-    }
+      if (!allowed) {
+        return {
+          checked: true,
+          flagged: true,
+          code: "INAPPROPRIATE_TOPIC",
+          reason: parsedReason,
+          message:
+            parsedMessage.trim() ||
+            "This topic is not allowed. Please enter an academic study topic.",
+        };
+      }
 
-    return { checked: true, flagged: false };
-  } catch (err) {
-    const mapped = mapProviderError(GROQ_PROVIDER, err);
-    console.warn("Groq guard moderation failed", {
-      reason: mapped.diagnostics?.reason,
-      status: mapped.diagnostics?.status,
-      code: mapped.diagnostics?.code,
-    });
-    // Fail-open to avoid blocking legitimate education traffic when guard provider has issues.
-    return { checked: false, flagged: false };
+      return { checked: true, flagged: false, model: guardModel };
+    } catch (err) {
+      const mapped = mapProviderError(GROQ_PROVIDER, err);
+      const modelMissing =
+        mapped.diagnostics?.status === 404 ||
+        mapped.diagnostics?.code === "model_not_found" ||
+        mapped.diagnostics?.reason === "model_not_found";
+
+      lastErr = mapped;
+      // try next guard model when this one is missing
+      if (modelMissing) {
+        continue;
+      }
+
+      console.warn("Groq guard moderation failed", {
+        reason: mapped.diagnostics?.reason,
+        status: mapped.diagnostics?.status,
+        code: mapped.diagnostics?.code,
+      });
+      // fail-open for transient errors
+      return { checked: false, flagged: false };
+    }
   }
+
+  if (lastErr) {
+    console.warn("Groq guard moderation failed for all models", {
+      reason: lastErr.diagnostics?.reason,
+      status: lastErr.diagnostics?.status,
+      code: lastErr.diagnostics?.code,
+    });
+  }
+  // fail-open if no guard model worked
+  return { checked: false, flagged: false };
 };
 
 export const generateTopicWithAI = async (topic) => {
