@@ -15,11 +15,15 @@ const getAdminEmails = () =>
 
 const getSmtpConfig = () => {
   const host = envVal("SMTP_HOST", "MAIL_HOST");
-  const port = envVal("SMTP_PORT", "MAIL_PORT") || "587";
+  const portRaw = envVal("SMTP_PORT", "MAIL_PORT") || "587";
+  const port = Number(portRaw);
   const user = envVal("SMTP_USER", "MAIL_USER");
   const pass = envVal("SMTP_PASS", "MAIL_PASS");
   const from = envVal("SMTP_FROM", "MAIL_FROM") || user;
-  return { host, port: Number(port), user, pass, from };
+  const secure =
+    String(envVal("SMTP_SECURE")).toLowerCase() === "true" || port === 465;
+  const timeoutMs = Number(envVal("SMTP_TIMEOUT_MS")) || 15000;
+  return { host, port, user, pass, from, secure, timeoutMs };
 };
 
 const hasSmtpConfig = () => {
@@ -28,12 +32,15 @@ const hasSmtpConfig = () => {
 };
 
 const buildTransport = () => {
-  const { host, port, user, pass } = getSmtpConfig();
+  const { host, port, user, pass, secure, timeoutMs } = getSmtpConfig();
   return nodemailer.createTransport({
     host,
     port: Number(port || 587),
-    secure: Number(port) === 465,
+    secure,
     auth: { user, pass },
+    connectionTimeout: timeoutMs,
+    greetingTimeout: timeoutMs,
+    socketTimeout: timeoutMs,
   });
 };
 
