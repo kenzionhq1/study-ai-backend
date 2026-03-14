@@ -5,6 +5,7 @@ import {
   createUserMemory,
   findUserByEmailMemory,
 } from "../store/memoryStore.js";
+import { sendAdminSignupNotification } from "../services/notifyService.js";
 
 const generateToken = (id) =>
   jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "30d" });
@@ -46,6 +47,9 @@ export const registerUser = async (req, res) => {
           email: normalizedEmail,
           password: hashedPassword,
         });
+
+    // fire-and-forget admin notification (if SMTP + ADMIN_EMAILS configured)
+    sendAdminSignupNotification({ name: user.name, email: user.email }).catch(() => {});
 
     return res.status(201).json({
       token: generateToken(user._id),

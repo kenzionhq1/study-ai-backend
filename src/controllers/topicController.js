@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Topic from "../models/Topic.js";
+import TokenUsage from "../models/TokenUsage.js";
 import {
   AIProviderUnavailableError,
   generateTopicWithAI,
@@ -67,6 +68,21 @@ export const generateTopic = async (req, res) => {
           content: aiResult.content,
           questions: aiResult.questions,
         });
+
+    // record token usage per user when AI call succeeds (Mongo only)
+    if (!useMemoryDb()) {
+      const usage = aiResult?.usage || {};
+      await TokenUsage.create({
+        userId,
+        topicId: newTopic._id,
+        provider: source,
+        model: aiResult?.model || "",
+        promptTokens: usage.promptTokens || 0,
+        completionTokens: usage.completionTokens || 0,
+        totalTokens: usage.totalTokens || 0,
+        status: "success",
+      });
+    }
 
     const payload = asObject(newTopic);
     return res.status(200).json({ ...payload, source, flagged: false });

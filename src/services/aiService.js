@@ -240,6 +240,23 @@ const extractTextFromResponse = (response) => {
 const extractTextFromChatCompletion = (response) =>
   response?.choices?.[0]?.message?.content?.trim?.() || "";
 
+const normalizeUsage = (usage = {}) => {
+  const prompt =
+    usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokens ?? usage.inputTokens ?? 0;
+  const completion =
+    usage.completion_tokens ??
+    usage.output_tokens ??
+    usage.completionTokens ??
+    usage.outputTokens ??
+    0;
+  const total = usage.total_tokens ?? usage.totalTokens ?? prompt + completion;
+  return {
+    promptTokens: Number(prompt) || 0,
+    completionTokens: Number(completion) || 0,
+    totalTokens: Number(total) || 0,
+  };
+};
+
 const parseTopicJson = (text) => {
   if (!text) throw new SyntaxError("Empty AI text response");
 
@@ -537,6 +554,13 @@ export const generateTopicWithAI = async (topic) => {
         if (maxTopicTokens) requestPayload.max_tokens = maxTopicTokens;
         const response = await client.chat.completions.create(requestPayload);
         text = extractTextFromChatCompletion(response);
+        const usage = normalizeUsage(response?.usage);
+        return {
+          ...normalizeGeneratedTopic(text ? parseTopicJson(text) : {}, normalizedTopic, includeDiagram),
+          source: provider,
+          model,
+          usage,
+        };
       } else {
         const requestPayload = {
           model,
@@ -545,14 +569,14 @@ export const generateTopicWithAI = async (topic) => {
         if (maxTopicTokens) requestPayload.max_output_tokens = maxTopicTokens;
         const response = await client.responses.create(requestPayload);
         text = extractTextFromResponse(response);
+        const usage = normalizeUsage(response?.usage);
+        return {
+          ...normalizeGeneratedTopic(text ? parseTopicJson(text) : {}, normalizedTopic, includeDiagram),
+          source: provider,
+          model,
+          usage,
+        };
       }
-
-      const parsed = parseTopicJson(text);
-      return {
-        ...normalizeGeneratedTopic(parsed, normalizedTopic, includeDiagram),
-        source: provider,
-        model,
-      };
     } catch (err) {
       const mapped = mapProviderError(provider, err);
       const modelMissing =

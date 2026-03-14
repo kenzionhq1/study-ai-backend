@@ -6,6 +6,7 @@ import cors from "cors";
 
 import authRoutes from "./src/routes/auth.js";
 import topicRoutes from "./src/routes/topics.js";
+import adminRoutes from "./src/routes/admin.js";
 
 dotenv.config();
 
@@ -185,6 +186,7 @@ app.use(express.json());
 // Routes
 app.use("/api/auth", authRoutes);
 app.use("/api/topics", topicRoutes);
+app.use("/api/admin", adminRoutes);
 
 // Test route
 app.get("/", (req, res) => res.send("API Running"));
