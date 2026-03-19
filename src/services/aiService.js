@@ -536,22 +536,26 @@ Return JSON only:
         continue;
       }
 
-      console.warn("Groq guard moderation failed", {
-        reason: mapped.diagnostics?.reason,
-        status: mapped.diagnostics?.status,
-        code: mapped.diagnostics?.code,
-      });
-      // fail-open for transient errors
+      // For other errors, fail-open quietly to avoid blocking users
+      if (process.env.DEBUG_GUARD_ERRORS === "true") {
+        console.warn("Groq guard moderation failed", {
+          reason: mapped.diagnostics?.reason,
+          status: mapped.diagnostics?.status,
+          code: mapped.diagnostics?.code,
+        });
+      }
       return { checked: false, flagged: false };
     }
   }
 
   if (lastErr) {
-    console.warn("Groq guard moderation failed for all models", {
-      reason: lastErr.diagnostics?.reason,
-      status: lastErr.diagnostics?.status,
-      code: lastErr.diagnostics?.code,
-    });
+    if (process.env.DEBUG_GUARD_ERRORS === "true") {
+      console.warn("Groq guard moderation failed for all models", {
+        reason: lastErr.diagnostics?.reason,
+        status: lastErr.diagnostics?.status,
+        code: lastErr.diagnostics?.code,
+      });
+    }
   }
   // fail-open if no guard model worked
   return { checked: false, flagged: false };
