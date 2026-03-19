@@ -233,6 +233,23 @@ const mapProviderError = (provider, err) => {
   };
 };
 
+const parseJsonSafe = (text, fallback = {}) => {
+  try {
+    if (!text) return fallback;
+    return JSON.parse(text);
+  } catch {
+    const fenced = text.match(/```json\\s*([\\s\\S]*?)```/i) || text.match(/```([\\s\\S]*?)```/i);
+    if (fenced?.[1]) {
+      try {
+        return JSON.parse(fenced[1].trim());
+      } catch {
+        return fallback;
+      }
+    }
+  }
+  return fallback;
+};
+
 const extractTextFromResponse = (response) => {
   if (typeof response?.output_text === "string" && response.output_text.trim()) {
     return response.output_text.trim();
@@ -288,147 +305,142 @@ const parseTopicJson = (text) => {
   }
 };
 
-const normalizeGeneratedTopic = (raw, normalizedTopic, includeDiagram = false) => {
-  const topicValue = String(raw?.topic || normalizedTopic).trim() || normalizedTopic;
-  const content = raw?.content || {};
-
-  const normalizeList = (value) =>
-    Array.isArray(value)
-      ? value.map((item) => String(item || "").trim()).filter(Boolean)
-      : [];
-
-  const questionsRaw = Array.isArray(raw?.questions) ? raw.questions : [];
-  const normalizedQuestions = questionsRaw
-    .map((q) => {
-      const options = Array.isArray(q?.options)
-        ? q.options.map((opt) => String(opt || "").trim()).filter(Boolean).slice(0, 4)
-        : [];
-      if (!q?.question || options.length < 2) return null;
+const normalizeStructuredTopic = (raw, normalizedTopic) => {
+  const safeTopic = String(raw?.topic || normalizedTopic).trim() || normalizedTopic;
+  const sectionsRaw = Array.isArray(raw?.sections) ? raw.sections : [];
+  const sections = sectionsRaw
+    .map((section, idx) => {
+      const type = String(section?.type || "text").trim();
       return {
-        question: String(q.question).trim(),
-        options,
-        answer: String(q.answer || options[0] || "").trim(),
+        type,
+        heading: String(section?.heading || `Section ${idx + 1}`).trim(),
+        content: String(section?.content || "").trim(),
+        items: Array.isArray(section?.items) ? section.items.map((v) => String(v || "").trim()).filter(Boolean) : [],
+        steps: Array.isArray(section?.steps) ? section.steps.map((v) => String(v || "").trim()).filter(Boolean) : [],
+        questions: Array.isArray(section?.questions)
+          ? section.questions.map((q) => ({
+              question: String(q?.question || "").trim(),
+              answer: String(q?.answer || "").trim(),
+              options: Array.isArray(q?.options)
+                ? q.options.map((o) => String(o || "").trim()).filter(Boolean).slice(0, 4)
+                : [],
+            }))
+          : [],
       };
     })
-    .filter(Boolean);
+    .filter((s) => s.content || s.items.length || s.steps.length || s.questions.length);
 
-  while (normalizedQuestions.length < 5) {
-    const idx = normalizedQuestions.length + 1;
-    normalizedQuestions.push({
-      question: `Practice question ${idx} on ${topicValue}: choose the most accurate statement.`,
-      options: ["Option A", "Option B", "Option C", "Option D"],
-      answer: "Option A",
+  if (!sections.length) {
+    sections.push({
+      type: "text",
+      heading: safeTopic,
+      content: "No structured content was returned.",
+      items: [],
+      steps: [],
+      questions: [],
     });
   }
 
-  const normalized = {
-    topic: topicValue,
+  return {
+    topic: safeTopic,
     content: {
-      definition: String(content.definition || "").trim(),
-      explanation: String(content.explanation || "").trim(),
-      keyPoints: normalizeList(content.keyPoints),
-      example: {
-        title: String(content.example?.title || `${topicValue} Example`).trim(),
-        content: String(content.example?.content || "").trim(),
-      },
-      examTips: normalizeList(content.examTips),
+      title: String(raw?.title || safeTopic).trim() || safeTopic,
+      sections,
     },
-    questions: normalizedQuestions.slice(0, 5),
+    questions: [], // preserved field for compatibility; sections may contain questions
   };
-
-  if (includeDiagram) {
-    const diagram = content.diagram || {};
-    const mermaid = String(diagram.mermaid || "").trim() || buildFallbackMermaid(topicValue);
-    normalized.content.diagram = {
-      title: String(diagram.title || `${topicValue} Diagram`).trim(),
-      type: "mermaid",
-      mermaid,
-      caption: String(diagram.caption || "Visual process overview").trim(),
-      imageUrl: toMermaidImageUrl(mermaid),
-    };
-  }
-
-  return normalized;
 };
 
-const buildStudyPrompt = (normalizedTopic, includeDiagram = false) => {
-  const diagramBlock = includeDiagram
-    ? ',\n    "diagram": { "title": "", "type": "mermaid", "mermaid": "", "caption": "" }'
-    : "";
-  const diagramSection = includeDiagram
-    ? '\n8) Diagram Output (Required for this topic)\n- Fill "content.diagram" with a valid Mermaid flowchart for the core process.\n- Keep Mermaid syntax clean and renderable.'
-    : "";
+const analyzeUserIntent = async (topic) => {
+  const defaultMeta = {
+    intent: "explain",
+    best_format: "breakdown",
+    difficulty: "intermediate",
+    tone: "detailed",
+  };
 
-  return `
-You are an elite professor and textbook author.
-Write like top-university lecture notes (MIT/Stanford style): precise, deep, and clear.
+  const provider = getProvider();
+  if (provider === LOCAL_PROVIDER) return defaultMeta;
 
-Topic: ${normalizedTopic}
+  const models =
+    provider === GROQ_PROVIDER ? getGroqModels() : getOpenAIModels();
+  const model = models[0];
+  const client = provider === GROQ_PROVIDER ? getGroqClient() : getOpenAIClient();
+  const prompt = `
+Analyze the user's topic and decide the best way to answer.
+Return STRICT JSON only with keys: intent (explain|solve|summarize|compare|analyze), best_format (step-by-step|narrative|breakdown|bullets|qa|mixed), difficulty (beginner|intermediate|advanced), tone (simple|detailed|exam-focused).
+Topic: "${topic}"
+JSON only. No prose.`;
 
-Return strict JSON only with this exact shape:
+  try {
+    const response =
+      provider === GROQ_PROVIDER
+        ? await client.chat.completions.create({
+            model,
+            temperature: 0,
+            response_format: { type: "json_object" },
+            messages: [
+              { role: "system", content: "You return only valid JSON." },
+              { role: "user", content: prompt },
+            ],
+          })
+        : await client.chat.completions.create({
+            model,
+            temperature: 0,
+            messages: [
+              { role: "system", content: "You return only valid JSON." },
+              { role: "user", content: prompt },
+            ],
+          });
+
+    const text = extractTextFromChatCompletion(response);
+    const parsed = parseJsonSafe(text, defaultMeta);
+    return {
+      intent: parsed.intent || defaultMeta.intent,
+      best_format: parsed.best_format || defaultMeta.best_format,
+      difficulty: parsed.difficulty || defaultMeta.difficulty,
+      tone: parsed.tone || defaultMeta.tone,
+    };
+  } catch (err) {
+    console.warn("analyzeUserIntent failed; using defaults", { message: err?.message });
+    return defaultMeta;
+  }
+};
+
+const buildDynamicPrompt = (topic, meta) => {
+  const formatHint = meta?.best_format || "mixed";
+  const difficulty = meta?.difficulty || "intermediate";
+  const tone = meta?.tone || "detailed";
+
+  return `You are an adaptive tutor. Topic: "${topic}".
+Intent: ${meta?.intent || "explain"}
+Best format: ${formatHint}
+Difficulty: ${difficulty}
+Tone: ${tone}
+
+Produce a structured, concise, and readable explanation tailored to the intent and format above.
+
+Return STRICT JSON in this shape:
 {
-  "topic": "${normalizedTopic}",
-  "content": {
-    "definition": "",
-    "explanation": "",
-    "keyPoints": [],
-    "example": { "title": "", "content": "" },
-    "examTips": []${diagramBlock}
-  },
-  "questions": [
-    { "question": "", "options": ["", "", "", ""], "answer": "" }
+  "title": "<short title>",
+  "sections": [
+    {
+      "type": "text | list | steps | qa",
+      "heading": "<section heading>",
+      "content": "<plain text>",
+      "items": ["bullet item 1", "bullet item 2"],
+      "steps": ["step 1", "step 2"],
+      "questions": [
+        { "question": "<short question>", "answer": "<short answer>", "options": ["A","B"] }
+      ]
+    }
   ]
 }
 
-Inside the JSON content, follow this structure:
-1) Concept Definition
-- Put a clear textbook definition in "content.definition".
-
-2) Core Idea (Plain Understanding)
-- Start "content.explanation" with intuition in simple language.
-
-3) Key Components
-- Put major components as concise items in "content.keyPoints".
-
-4) Adaptive Explanation Style (IMPORTANT)
-- First infer topic type, then choose the best style:
-  a) Process/algorithm/science topics:
-     - use stepwise mechanism and arrow flow.
-     - Example style: Input -> Step 1 -> Step 2 -> Output
-  b) History/story/social topics:
-     - use narrative + chronology + cause-and-effect.
-     - Use timeline style (not mechanical step arrows), e.g.:
-       Pre-war tensions -> Trigger event -> Escalation -> Outcome -> Long-term impact
-  c) Math/theory topics:
-     - use intuition -> formal idea -> worked reasoning path -> common pitfalls.
-
-5) Detailed Explanation
-- In "content.explanation", explain why each stage/event/step happens (depending on style chosen).
-
-6) Real-World Example
-- Put this in "content.example.content".
-
-7) Mini Diagram Using Text
-- Add a concise text diagram in "content.example.content" that matches topic type.
-- For history/story topics use timeline/causal map, not mechanical pipeline arrows.
-${diagramSection}
-
-Quality + length targets (approximate):
-- definition: around 80 words
-- explanation: 380-500 words (highest priority)
-- key points total: around 150 words
-- example section: around 200 words
-- exam tips total: around 100 words
-- 5 MCQ questions total: around 200 words
-
 Rules:
-- Return exactly 5 multiple-choice questions.
-- Each question must have exactly 4 options.
-- "answer" must exactly match one option text.
-- Choose style that best matches the topic; do NOT force process arrows for history/story topics.
-- No markdown, no code fence, JSON only.
-- If output is too long, keep explanation depth first and shorten lower-priority sections.
-`;
+- Only include fields that fit the chosen format; leave arrays empty when not needed.
+- Keep it focused and non-repetitive.
+- No markdown fences, no prose outside JSON.`;
 };
 
 export const moderateTopicWithAI = async (topic) => {
@@ -556,7 +568,27 @@ export const generateTopicWithAI = async (topic) => {
   const includeDiagram = shouldIncludeDiagram(normalizedTopic);
 
   if (provider === LOCAL_PROVIDER) {
-    return buildLocalTopic(normalizedTopic, includeDiagram);
+    const localContent = buildLocalTopic(normalizedTopic, includeDiagram);
+    return {
+      topic: localContent.topic,
+      content: {
+        title: localContent.topic,
+        sections: [
+          {
+            type: "text",
+            heading: localContent.topic,
+            content: localContent.content?.explanation || "Local provider response.",
+            items: localContent.content?.keyPoints || [],
+            steps: [],
+            questions: [],
+          },
+        ],
+      },
+      questions: [],
+      source: LOCAL_PROVIDER,
+      model: "local",
+      meta,
+    };
   }
 
   if (![OPENAI_PROVIDER, GROQ_PROVIDER].includes(provider)) {
@@ -569,7 +601,8 @@ export const generateTopicWithAI = async (topic) => {
     });
   }
 
-  const prompt = buildStudyPrompt(normalizedTopic, includeDiagram);
+  const meta = await analyzeUserIntent(normalizedTopic);
+  const prompt = buildDynamicPrompt(normalizedTopic, meta);
   const models = provider === GROQ_PROVIDER ? getGroqModels() : getOpenAIModels();
   const client = provider === GROQ_PROVIDER ? getGroqClient() : getOpenAIClient();
   const maxTopicTokens = getMaxTopicTokens();
@@ -577,43 +610,44 @@ export const generateTopicWithAI = async (topic) => {
 
   for (const model of models) {
     try {
-      let text = "";
-      if (provider === GROQ_PROVIDER) {
-        const requestPayload = {
-          model,
-          temperature: Number(process.env.AI_TEMPERATURE || 0.35),
-          response_format: { type: "json_object" },
-          messages: [
-            { role: "system", content: "You generate high-quality educational JSON outputs." },
-            { role: "user", content: prompt },
-          ],
-        };
-        if (maxTopicTokens) requestPayload.max_tokens = maxTopicTokens;
-        const response = await client.chat.completions.create(requestPayload);
-        text = extractTextFromChatCompletion(response);
-        const usage = normalizeUsage(response?.usage);
-        return {
-          ...normalizeGeneratedTopic(text ? parseTopicJson(text) : {}, normalizedTopic, includeDiagram),
-          source: provider,
-          model,
-          usage,
-        };
-      } else {
-        const requestPayload = {
-          model,
-          input: prompt,
-        };
-        if (maxTopicTokens) requestPayload.max_output_tokens = maxTopicTokens;
-        const response = await client.responses.create(requestPayload);
-        text = extractTextFromResponse(response);
-        const usage = normalizeUsage(response?.usage);
-        return {
-          ...normalizeGeneratedTopic(text ? parseTopicJson(text) : {}, normalizedTopic, includeDiagram),
-          source: provider,
-          model,
-          usage,
-        };
+      const requestPayload = {
+        model,
+        temperature: Number(process.env.AI_TEMPERATURE || 0.35),
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: "You generate concise, structured JSON answers." },
+          { role: "user", content: prompt },
+        ],
+      };
+      if (maxTopicTokens) requestPayload.max_tokens = maxTopicTokens;
+
+      const response = await client.chat.completions.create(requestPayload);
+      const text = extractTextFromChatCompletion(response);
+      const parsed = parseJsonSafe(text, {});
+
+      if (!parsed?.sections || !Array.isArray(parsed.sections) || !parsed.sections.length) {
+        parsed.sections = [
+          {
+            type: "text",
+            heading: normalizedTopic,
+            content: text || "No content returned",
+            items: [],
+            steps: [],
+            questions: [],
+          },
+        ];
       }
+
+      const normalized = normalizeStructuredTopic(parsed, normalizedTopic);
+      const usage = normalizeUsage(response?.usage);
+
+      return {
+        ...normalized,
+        source: provider,
+        model,
+        usage,
+        meta,
+      };
     } catch (err) {
       const mapped = mapProviderError(provider, err);
       const modelMissing =
