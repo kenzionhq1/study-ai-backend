@@ -16,12 +16,7 @@ const OPENAI_PROVIDER = "openai";
 const GROQ_PROVIDER = "groq";
 const DEFAULT_OPENAI_MODELS = ["gpt-4o-mini", "gpt-4.1-mini"];
 const DEFAULT_GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
-const DEFAULT_GROQ_GUARD_MODELS = [
-  "meta-llama/llama-prompt-guard-2-22m",
-  "meta-llama/llama-prompt-guard-2-86m",
-  "meta-llama/llama-guard-4-12b",
-  "openai/gpt-oss-safeguard-20b",
-];
+const DEFAULT_GROQ_GUARD_MODEL = "meta-llama/llama-guard-4-12b";
 const getMaxTopicTokens = () => {
   const raw = Number(process.env.MAX_TOPIC_TOKENS);
   if (!Number.isFinite(raw) || raw <= 0) return null;
@@ -39,15 +34,8 @@ const getGroqModels = () =>
     .split(",")
     .map((model) => model.trim())
     .filter(Boolean);
-const getGroqGuardModels = () => {
-  const raw =
-    process.env.GROQ_GUARD_MODELS || process.env.GROQ_GUARD_MODEL || "";
-  const list = raw
-    .split(",")
-    .map((m) => m.trim())
-    .filter(Boolean);
-  return list.length ? list : DEFAULT_GROQ_GUARD_MODELS;
-};
+const getGroqGuardModel = () =>
+  (process.env.GROQ_GUARD_MODEL || DEFAULT_GROQ_GUARD_MODEL).trim();
 const useGroqGuard = () =>
   process.env.USE_GROQ_GUARD === "true" && getProvider() === GROQ_PROVIDER;
 const SCIENCE_DIAGRAM_KEYWORDS = [
@@ -233,23 +221,6 @@ const mapProviderError = (provider, err) => {
   };
 };
 
-const parseJsonSafe = (text, fallback = {}) => {
-  try {
-    if (!text) return fallback;
-    return JSON.parse(text);
-  } catch {
-    const fenced = text.match(/```json\\s*([\\s\\S]*?)```/i) || text.match(/```([\\s\\S]*?)```/i);
-    if (fenced?.[1]) {
-      try {
-        return JSON.parse(fenced[1].trim());
-      } catch {
-        return fallback;
-      }
-    }
-  }
-  return fallback;
-};
-
 const extractTextFromResponse = (response) => {
   if (typeof response?.output_text === "string" && response.output_text.trim()) {
     return response.output_text.trim();
@@ -268,23 +239,6 @@ const extractTextFromResponse = (response) => {
 
 const extractTextFromChatCompletion = (response) =>
   response?.choices?.[0]?.message?.content?.trim?.() || "";
-
-const normalizeUsage = (usage = {}) => {
-  const prompt =
-    usage.prompt_tokens ?? usage.input_tokens ?? usage.promptTokens ?? usage.inputTokens ?? 0;
-  const completion =
-    usage.completion_tokens ??
-    usage.output_tokens ??
-    usage.completionTokens ??
-    usage.outputTokens ??
-    0;
-  const total = usage.total_tokens ?? usage.totalTokens ?? prompt + completion;
-  return {
-    promptTokens: Number(prompt) || 0,
-    completionTokens: Number(completion) || 0,
-    totalTokens: Number(total) || 0,
-  };
-};
 
 const parseTopicJson = (text) => {
   if (!text) throw new SyntaxError("Empty AI text response");
@@ -305,142 +259,147 @@ const parseTopicJson = (text) => {
   }
 };
 
-const normalizeStructuredTopic = (raw, normalizedTopic) => {
-  const safeTopic = String(raw?.topic || normalizedTopic).trim() || normalizedTopic;
-  const sectionsRaw = Array.isArray(raw?.sections) ? raw.sections : [];
-  const sections = sectionsRaw
-    .map((section, idx) => {
-      const type = String(section?.type || "text").trim();
+const normalizeGeneratedTopic = (raw, normalizedTopic, includeDiagram = false) => {
+  const topicValue = String(raw?.topic || normalizedTopic).trim() || normalizedTopic;
+  const content = raw?.content || {};
+
+  const normalizeList = (value) =>
+    Array.isArray(value)
+      ? value.map((item) => String(item || "").trim()).filter(Boolean)
+      : [];
+
+  const questionsRaw = Array.isArray(raw?.questions) ? raw.questions : [];
+  const normalizedQuestions = questionsRaw
+    .map((q) => {
+      const options = Array.isArray(q?.options)
+        ? q.options.map((opt) => String(opt || "").trim()).filter(Boolean).slice(0, 4)
+        : [];
+      if (!q?.question || options.length < 2) return null;
       return {
-        type,
-        heading: String(section?.heading || `Section ${idx + 1}`).trim(),
-        content: String(section?.content || "").trim(),
-        items: Array.isArray(section?.items) ? section.items.map((v) => String(v || "").trim()).filter(Boolean) : [],
-        steps: Array.isArray(section?.steps) ? section.steps.map((v) => String(v || "").trim()).filter(Boolean) : [],
-        questions: Array.isArray(section?.questions)
-          ? section.questions.map((q) => ({
-              question: String(q?.question || "").trim(),
-              answer: String(q?.answer || "").trim(),
-              options: Array.isArray(q?.options)
-                ? q.options.map((o) => String(o || "").trim()).filter(Boolean).slice(0, 4)
-                : [],
-            }))
-          : [],
+        question: String(q.question).trim(),
+        options,
+        answer: String(q.answer || options[0] || "").trim(),
       };
     })
-    .filter((s) => s.content || s.items.length || s.steps.length || s.questions.length);
+    .filter(Boolean);
 
-  if (!sections.length) {
-    sections.push({
-      type: "text",
-      heading: safeTopic,
-      content: "No structured content was returned.",
-      items: [],
-      steps: [],
-      questions: [],
+  while (normalizedQuestions.length < 5) {
+    const idx = normalizedQuestions.length + 1;
+    normalizedQuestions.push({
+      question: `Practice question ${idx} on ${topicValue}: choose the most accurate statement.`,
+      options: ["Option A", "Option B", "Option C", "Option D"],
+      answer: "Option A",
     });
   }
 
-  return {
-    topic: safeTopic,
+  const normalized = {
+    topic: topicValue,
     content: {
-      title: String(raw?.title || safeTopic).trim() || safeTopic,
-      sections,
+      definition: String(content.definition || "").trim(),
+      explanation: String(content.explanation || "").trim(),
+      keyPoints: normalizeList(content.keyPoints),
+      example: {
+        title: String(content.example?.title || `${topicValue} Example`).trim(),
+        content: String(content.example?.content || "").trim(),
+      },
+      examTips: normalizeList(content.examTips),
     },
-    questions: [], // preserved field for compatibility; sections may contain questions
-  };
-};
-
-const analyzeUserIntent = async (topic) => {
-  const defaultMeta = {
-    intent: "explain",
-    best_format: "breakdown",
-    difficulty: "intermediate",
-    tone: "detailed",
+    questions: normalizedQuestions.slice(0, 5),
   };
 
-  const provider = getProvider();
-  if (provider === LOCAL_PROVIDER) return defaultMeta;
-
-  const models =
-    provider === GROQ_PROVIDER ? getGroqModels() : getOpenAIModels();
-  const model = models[0];
-  const client = provider === GROQ_PROVIDER ? getGroqClient() : getOpenAIClient();
-  const prompt = `
-Analyze the user's topic and decide the best way to answer.
-Return STRICT JSON only with keys: intent (explain|solve|summarize|compare|analyze), best_format (step-by-step|narrative|breakdown|bullets|qa|mixed), difficulty (beginner|intermediate|advanced), tone (simple|detailed|exam-focused).
-Topic: "${topic}"
-JSON only. No prose.`;
-
-  try {
-    const response =
-      provider === GROQ_PROVIDER
-        ? await client.chat.completions.create({
-            model,
-            temperature: 0,
-            messages: [
-              { role: "system", content: "You return only valid JSON." },
-              { role: "user", content: prompt },
-            ],
-          })
-        : await client.chat.completions.create({
-            model,
-            temperature: 0,
-            response_format: { type: "json_object" },
-            messages: [
-              { role: "system", content: "You return only valid JSON." },
-              { role: "user", content: prompt },
-            ],
-          });
-
-    const text = extractTextFromChatCompletion(response);
-    const parsed = parseJsonSafe(text, defaultMeta);
-    return {
-      intent: parsed.intent || defaultMeta.intent,
-      best_format: parsed.best_format || defaultMeta.best_format,
-      difficulty: parsed.difficulty || defaultMeta.difficulty,
-      tone: parsed.tone || defaultMeta.tone,
+  if (includeDiagram) {
+    const diagram = content.diagram || {};
+    const mermaid = String(diagram.mermaid || "").trim() || buildFallbackMermaid(topicValue);
+    normalized.content.diagram = {
+      title: String(diagram.title || `${topicValue} Diagram`).trim(),
+      type: "mermaid",
+      mermaid,
+      caption: String(diagram.caption || "Visual process overview").trim(),
+      imageUrl: toMermaidImageUrl(mermaid),
     };
-  } catch (err) {
-    console.warn("analyzeUserIntent failed; using defaults", { message: err?.message });
-    return defaultMeta;
   }
+
+  return normalized;
 };
 
-const buildDynamicPrompt = (topic, meta) => {
-  const formatHint = meta?.best_format || "mixed";
-  const difficulty = meta?.difficulty || "intermediate";
-  const tone = meta?.tone || "detailed";
+const buildStudyPrompt = (normalizedTopic, includeDiagram = false) => {
+  const diagramBlock = includeDiagram
+    ? ',\n    "diagram": { "title": "", "type": "mermaid", "mermaid": "", "caption": "" }'
+    : "";
+  const diagramSection = includeDiagram
+    ? '\n8) Diagram Output (Required for this topic)\n- Fill "content.diagram" with a valid Mermaid flowchart for the core process.\n- Keep Mermaid syntax clean and renderable.'
+    : "";
 
-  return `You are an adaptive tutor. Topic: "${topic}".
-Intent: ${meta?.intent || "explain"}
-Best format: ${formatHint}
-Difficulty: ${difficulty}
-Tone: ${tone}
+  return `
+You are an elite professor and textbook author.
+Write like top-university lecture notes (MIT/Stanford style): precise, deep, and clear.
 
-Produce a structured, concise, and readable explanation tailored to the intent and format above.
+Topic: ${normalizedTopic}
 
-Return STRICT JSON in this shape:
+Return strict JSON only with this exact shape:
 {
-  "title": "<short title>",
-  "sections": [
-    {
-      "type": "text | list | steps | qa",
-      "heading": "<section heading>",
-      "content": "<plain text>",
-      "items": ["bullet item 1", "bullet item 2"],
-      "steps": ["step 1", "step 2"],
-      "questions": [
-        { "question": "<short question>", "answer": "<short answer>", "options": ["A","B"] }
-      ]
-    }
+  "topic": "${normalizedTopic}",
+  "content": {
+    "definition": "",
+    "explanation": "",
+    "keyPoints": [],
+    "example": { "title": "", "content": "" },
+    "examTips": []${diagramBlock}
+  },
+  "questions": [
+    { "question": "", "options": ["", "", "", ""], "answer": "" }
   ]
 }
 
+Inside the JSON content, follow this structure:
+1) Concept Definition
+- Put a clear textbook definition in "content.definition".
+
+2) Core Idea (Plain Understanding)
+- Start "content.explanation" with intuition in simple language.
+
+3) Key Components
+- Put major components as concise items in "content.keyPoints".
+
+4) Adaptive Explanation Style (IMPORTANT)
+- First infer topic type, then choose the best style:
+  a) Process/algorithm/science topics:
+     - use stepwise mechanism and arrow flow.
+     - Example style: Input -> Step 1 -> Step 2 -> Output
+  b) History/story/social topics:
+     - use narrative + chronology + cause-and-effect.
+     - Use timeline style (not mechanical step arrows), e.g.:
+       Pre-war tensions -> Trigger event -> Escalation -> Outcome -> Long-term impact
+  c) Math/theory topics:
+     - use intuition -> formal idea -> worked reasoning path -> common pitfalls.
+
+5) Detailed Explanation
+- In "content.explanation", explain why each stage/event/step happens (depending on style chosen).
+
+6) Real-World Example
+- Put this in "content.example.content".
+
+7) Mini Diagram Using Text
+- Add a concise text diagram in "content.example.content" that matches topic type.
+- For history/story topics use timeline/causal map, not mechanical pipeline arrows.
+${diagramSection}
+
+Quality + length targets (approximate):
+- definition: around 80 words
+- explanation: 380-500 words (highest priority)
+- key points total: around 150 words
+- example section: around 200 words
+- exam tips total: around 100 words
+- 5 MCQ questions total: around 200 words
+
 Rules:
-- Only include fields that fit the chosen format; leave arrays empty when not needed.
-- Keep it focused and non-repetitive.
-- No markdown fences, no prose outside JSON.`;
+- Return exactly 5 multiple-choice questions.
+- Each question must have exactly 4 options.
+- "answer" must exactly match one option text.
+- Choose style that best matches the topic; do NOT force process arrows for history/story topics.
+- No markdown, no code fence, JSON only.
+- If output is too long, keep explanation depth first and shorten lower-priority sections.
+`;
 };
 
 export const moderateTopicWithAI = async (topic) => {
@@ -459,13 +418,10 @@ export const moderateTopicWithAI = async (topic) => {
     return { checked: false, flagged: false };
   }
 
-  const guardModels = getGroqGuardModels();
-  const client = getGroqClient();
-  let lastErr = null;
-
-  for (const guardModel of guardModels) {
-    try {
-      const prompt = `
+  try {
+    const guardModel = getGroqGuardModel();
+    const client = getGroqClient();
+    const prompt = `
 Classify whether this topic is safe and appropriate for an educational study app.
 Topic: "${normalizedTopic}"
 
@@ -479,86 +435,60 @@ Return JSON only:
   "message": "short_user_message"
 }`;
 
-      const response = await client.chat.completions.create({
-        model: guardModel,
-        temperature: 0,
-        max_tokens: 120,
-        messages: [
-          { role: "system", content: "You are a strict safety classifier." },
-          { role: "user", content: prompt },
-        ],
-      });
+    const response = await client.chat.completions.create({
+      model: guardModel,
+      temperature: 0,
+      max_tokens: 120,
+      messages: [
+        { role: "system", content: "You are a strict safety classifier." },
+        { role: "user", content: prompt },
+      ],
+    });
 
-      const text = extractTextFromChatCompletion(response);
-      let allowed = true;
-      let parsedReason = "allowed";
-      let parsedMessage = "";
-      try {
-        const parsed = parseTopicJson(text);
-        allowed = Boolean(parsed?.allowed);
-        parsedReason = String(parsed?.reason || parsedReason);
-        parsedMessage = String(parsed?.message || parsedMessage);
-      } catch {
-        const lowered = text.toLowerCase();
-        if (
-          lowered.includes("disallow") ||
-          lowered.includes("not allowed") ||
-          lowered.includes("unsafe")
-        ) {
-          allowed = false;
-          parsedReason = "blocked_by_ai_guard";
-        }
+    const text = extractTextFromChatCompletion(response);
+    let allowed = true;
+    let parsedReason = "allowed";
+    let parsedMessage = "";
+    try {
+      const parsed = parseTopicJson(text);
+      allowed = Boolean(parsed?.allowed);
+      parsedReason = String(parsed?.reason || parsedReason);
+      parsedMessage = String(parsed?.message || parsedMessage);
+    } catch {
+      const lowered = text.toLowerCase();
+      if (
+        lowered.includes("disallow") ||
+        lowered.includes("not allowed") ||
+        lowered.includes("unsafe")
+      ) {
+        allowed = false;
+        parsedReason = "blocked_by_ai_guard";
       }
-
-      if (!allowed) {
-        return {
-          checked: true,
-          flagged: true,
-          code: "INAPPROPRIATE_TOPIC",
-          reason: parsedReason,
-          message:
-            parsedMessage.trim() ||
-            "This topic is not allowed. Please enter an academic study topic.",
-        };
-      }
-
-      return { checked: true, flagged: false, model: guardModel };
-    } catch (err) {
-      const mapped = mapProviderError(GROQ_PROVIDER, err);
-      const modelMissing =
-        mapped.diagnostics?.status === 404 ||
-        mapped.diagnostics?.code === "model_not_found" ||
-        mapped.diagnostics?.reason === "model_not_found";
-
-      lastErr = mapped;
-      // try next guard model when this one is missing
-      if (modelMissing) {
-        continue;
-      }
-
-      // For other errors, fail-open quietly to avoid blocking users
-      if (process.env.DEBUG_GUARD_ERRORS === "true") {
-        console.warn("Groq guard moderation failed", {
-          reason: mapped.diagnostics?.reason,
-          status: mapped.diagnostics?.status,
-          code: mapped.diagnostics?.code,
-        });
-      }
-      return { checked: false, flagged: false };
     }
-  }
 
-  if (lastErr) {
-    if (process.env.DEBUG_GUARD_ERRORS === "true") {
-      console.warn("Groq guard moderation failed for all models", {
-        reason: lastErr.diagnostics?.reason,
-        status: lastErr.diagnostics?.status,
-        code: lastErr.diagnostics?.code,
-      });
+    if (!allowed) {
+      return {
+        checked: true,
+        flagged: true,
+        code: "INAPPROPRIATE_TOPIC",
+        reason: parsedReason,
+        message:
+          parsedMessage.trim() ||
+          "This topic is not allowed. Please enter an academic study topic.",
+      };
     }
+
+    return { checked: true, flagged: false };
+  } catch (err) {
+    const mapped = mapProviderError(GROQ_PROVIDER, err);
+    console.warn("Groq guard moderation failed", {
+      reason: mapped.diagnostics?.reason,
+      status: mapped.diagnostics?.status,
+      code: mapped.diagnostics?.code,
+    });
+    // Fail-open to avoid blocking legitimate education traffic when guard provider has issues.
+    return { checked: false, flagged: false };
   }
-  // fail-open if no guard model worked
-  return { checked: false, flagged: false };
 };
 
 export const generateTopicWithAI = async (topic) => {
@@ -572,27 +502,7 @@ export const generateTopicWithAI = async (topic) => {
   const includeDiagram = shouldIncludeDiagram(normalizedTopic);
 
   if (provider === LOCAL_PROVIDER) {
-    const localContent = buildLocalTopic(normalizedTopic, includeDiagram);
-    return {
-      topic: localContent.topic,
-      content: {
-        title: localContent.topic,
-        sections: [
-          {
-            type: "text",
-            heading: localContent.topic,
-            content: localContent.content?.explanation || "Local provider response.",
-            items: localContent.content?.keyPoints || [],
-            steps: [],
-            questions: [],
-          },
-        ],
-      },
-      questions: [],
-      source: LOCAL_PROVIDER,
-      model: "local",
-      meta,
-    };
+    return buildLocalTopic(normalizedTopic, includeDiagram);
   }
 
   if (![OPENAI_PROVIDER, GROQ_PROVIDER].includes(provider)) {
@@ -605,8 +515,7 @@ export const generateTopicWithAI = async (topic) => {
     });
   }
 
-  const meta = await analyzeUserIntent(normalizedTopic);
-  const prompt = buildDynamicPrompt(normalizedTopic, meta);
+  const prompt = buildStudyPrompt(normalizedTopic, includeDiagram);
   const models = provider === GROQ_PROVIDER ? getGroqModels() : getOpenAIModels();
   const client = provider === GROQ_PROVIDER ? getGroqClient() : getOpenAIClient();
   const maxTopicTokens = getMaxTopicTokens();
@@ -614,46 +523,35 @@ export const generateTopicWithAI = async (topic) => {
 
   for (const model of models) {
     try {
-      const requestPayload = {
-        model,
-        temperature: Number(process.env.AI_TEMPERATURE || 0.35),
-        messages: [
-          { role: "system", content: "You generate concise, structured JSON answers." },
-          { role: "user", content: prompt },
-        ],
-      };
-      if (maxTopicTokens) requestPayload.max_tokens = maxTopicTokens;
-      const useJsonFormat = provider === OPENAI_PROVIDER;
-      if (useJsonFormat) {
-        requestPayload.response_format = { type: "json_object" };
+      let text = "";
+      if (provider === GROQ_PROVIDER) {
+        const requestPayload = {
+          model,
+          temperature: Number(process.env.AI_TEMPERATURE || 0.35),
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: "You generate high-quality educational JSON outputs." },
+            { role: "user", content: prompt },
+          ],
+        };
+        if (maxTopicTokens) requestPayload.max_tokens = maxTopicTokens;
+        const response = await client.chat.completions.create(requestPayload);
+        text = extractTextFromChatCompletion(response);
+      } else {
+        const requestPayload = {
+          model,
+          input: prompt,
+        };
+        if (maxTopicTokens) requestPayload.max_output_tokens = maxTopicTokens;
+        const response = await client.responses.create(requestPayload);
+        text = extractTextFromResponse(response);
       }
 
-      const response = await client.chat.completions.create(requestPayload);
-      const text = extractTextFromChatCompletion(response);
-      const parsed = parseJsonSafe(text, {});
-
-      if (!parsed?.sections || !Array.isArray(parsed.sections) || !parsed.sections.length) {
-        parsed.sections = [
-          {
-            type: "text",
-            heading: normalizedTopic,
-            content: text || "No content returned",
-            items: [],
-            steps: [],
-            questions: [],
-          },
-        ];
-      }
-
-      const normalized = normalizeStructuredTopic(parsed, normalizedTopic);
-      const usage = normalizeUsage(response?.usage);
-
+      const parsed = parseTopicJson(text);
       return {
-        ...normalized,
+        ...normalizeGeneratedTopic(parsed, normalizedTopic, includeDiagram),
         source: provider,
         model,
-        usage,
-        meta,
       };
     } catch (err) {
       const mapped = mapProviderError(provider, err);
@@ -678,28 +576,10 @@ export const generateTopicWithAI = async (topic) => {
     }
   }
 
-  // Fallback: return minimal local-style response instead of failing hard
-  const localContent = buildLocalTopic(normalizedTopic, includeDiagram);
-  return {
-    topic: localContent.topic,
-    content: {
-      title: localContent.topic,
-      sections: [
-        {
-          type: "text",
-          heading: localContent.topic,
-          content: localContent.content?.explanation || "AI provider unavailable; local fallback.",
-          items: localContent.content?.keyPoints || [],
-          steps: [],
-          questions: [],
-        },
-      ],
-    },
-    questions: [],
-    source: provider,
-    model: models?.[0] || "fallback",
-    meta,
-    usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
-    fallback: true,
-  };
+  throw (
+    lastErr ||
+    new AIProviderUnavailableError("AI provider is temporarily unavailable", {
+      reason: "no_working_model",
+    })
+  );
 };
