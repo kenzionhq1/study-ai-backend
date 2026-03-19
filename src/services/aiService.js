@@ -15,7 +15,7 @@ const LOCAL_PROVIDER = "local";
 const OPENAI_PROVIDER = "openai";
 const GROQ_PROVIDER = "groq";
 const DEFAULT_OPENAI_MODELS = ["gpt-4o-mini", "gpt-4.1-mini"];
-const DEFAULT_GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
+const DEFAULT_GROQ_MODELS = ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
 const DEFAULT_GROQ_GUARD_MODELS = [
   "meta-llama/llama-prompt-guard-2-22m",
   "meta-llama/llama-prompt-guard-2-86m",
