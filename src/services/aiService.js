@@ -15,7 +15,7 @@ const LOCAL_PROVIDER = "local";
 const OPENAI_PROVIDER = "openai";
 const GROQ_PROVIDER = "groq";
 const DEFAULT_OPENAI_MODELS = ["gpt-4o-mini", "gpt-4.1-mini"];
-const DEFAULT_GROQ_MODELS = ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.3-70b-versatile", "llama-3.1-8b-instant"];
+const DEFAULT_GROQ_MODELS = ["llama-3.1-8b-instant", "llama-3.3-70b-versatile"];
 const DEFAULT_GROQ_GUARD_MODELS = [
   "meta-llama/llama-prompt-guard-2-22m",
   "meta-llama/llama-prompt-guard-2-86m",
@@ -378,7 +378,6 @@ JSON only. No prose.`;
         ? await client.chat.completions.create({
             model,
             temperature: 0,
-            response_format: { type: "json_object" },
             messages: [
               { role: "system", content: "You return only valid JSON." },
               { role: "user", content: prompt },
@@ -387,6 +386,7 @@ JSON only. No prose.`;
         : await client.chat.completions.create({
             model,
             temperature: 0,
+            response_format: { type: "json_object" },
             messages: [
               { role: "system", content: "You return only valid JSON." },
               { role: "user", content: prompt },
@@ -617,13 +617,16 @@ export const generateTopicWithAI = async (topic) => {
       const requestPayload = {
         model,
         temperature: Number(process.env.AI_TEMPERATURE || 0.35),
-        response_format: { type: "json_object" },
         messages: [
           { role: "system", content: "You generate concise, structured JSON answers." },
           { role: "user", content: prompt },
         ],
       };
       if (maxTopicTokens) requestPayload.max_tokens = maxTopicTokens;
+      const useJsonFormat = provider === OPENAI_PROVIDER;
+      if (useJsonFormat) {
+        requestPayload.response_format = { type: "json_object" };
+      }
 
       const response = await client.chat.completions.create(requestPayload);
       const text = extractTextFromChatCompletion(response);
