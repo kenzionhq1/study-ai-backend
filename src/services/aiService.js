@@ -678,10 +678,28 @@ export const generateTopicWithAI = async (topic) => {
     }
   }
 
-  throw (
-    lastErr ||
-    new AIProviderUnavailableError("AI provider is temporarily unavailable", {
-      reason: "no_working_model",
-    })
-  );
+  // Fallback: return minimal local-style response instead of failing hard
+  const localContent = buildLocalTopic(normalizedTopic, includeDiagram);
+  return {
+    topic: localContent.topic,
+    content: {
+      title: localContent.topic,
+      sections: [
+        {
+          type: "text",
+          heading: localContent.topic,
+          content: localContent.content?.explanation || "AI provider unavailable; local fallback.",
+          items: localContent.content?.keyPoints || [],
+          steps: [],
+          questions: [],
+        },
+      ],
+    },
+    questions: [],
+    source: provider,
+    model: models?.[0] || "fallback",
+    meta,
+    usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+    fallback: true,
+  };
 };
